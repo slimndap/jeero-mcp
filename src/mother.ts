@@ -1,3 +1,5 @@
+import fs from "node:fs";
+
 import type { JeeroConfig } from "./config.js";
 
 export interface MotherSubscriptionResponse {
@@ -21,11 +23,17 @@ export interface MotherInboxItem {
 }
 
 export class MotherClient {
+  private readonly traceLogger: MotherTraceLogger | null;
+
   public constructor(
     private readonly config: JeeroConfig,
     private readonly siteKey: string,
     private readonly siteIdentifier: string,
-  ) {}
+  ) {
+    this.traceLogger = config.motherTraceEnabled
+      ? new MotherTraceLogger(config.motherTracePath)
+      : null;
+  }
 
   public async createSubscription(): Promise<{ subscriptionId: string; raw: unknown }> {
     const response = await this.request("POST", "/v1/subscriptions");
@@ -104,23 +112,58 @@ export class MotherClient {
     body?: unknown,
     extraHeaders: Record<string, string> = {},
   ): Promise<Response> {
-    const response = await fetch(`${this.config.motherBaseUrl}${pathname}`, {
+    const url = `${this.config.motherBaseUrl}${pathname}`;
+    const headers: Record<string, string> = {
+      site_key: this.siteKey,
+      site_url: this.siteIdentifier,
+      ...extraHeaders,
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+    };
+    const requestBody = body === undefined ? undefined : JSON.stringify(body);
+
+    this.traceLogger?.log({
+      phase: "request",
       method,
-      headers: {
-        site_key: this.siteKey,
-        site_url: this.siteIdentifier,
-        ...extraHeaders,
-        ...(body === undefined ? {} : { "content-type": "application/json" }),
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      url,
+      headers,
+      body: requestBody,
+    });
+
+    const response = await fetch(url, {
+      method,
+      headers,
+      body: requestBody,
+    });
+
+    const responseBody = await response.clone().text();
+    this.traceLogger?.log({
+      phase: "response",
+      method,
+      url,
+      status: response.status,
+      statusText: response.statusText,
+      body: responseBody,
     });
 
     if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`Mother request failed (${response.status} ${response.statusText}): ${text}`);
+      throw new Error(
+        `Mother request failed (${response.status} ${response.statusText}) for ${method} ${pathname}: ${responseBody}`,
+      );
     }
 
     return response;
+  }
+}
+
+class MotherTraceLogger {
+  public constructor(private readonly filePath: string) {}
+
+  public log(entry: Record<string, unknown>): void {
+    const line = JSON.stringify({
+      timestamp: new Date().toISOString(),
+      ...entry,
+    });
+    fs.appendFileSync(this.filePath, `${line}\n`, "utf8");
   }
 }
 

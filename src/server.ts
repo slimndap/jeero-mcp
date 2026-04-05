@@ -6,7 +6,13 @@ import { JeeroDatabase } from "./db.js";
 import type { JeeroConfig } from "./config.js";
 import { loadOrCreateSiteIdentity } from "./config.js";
 import { MotherClient, type MotherInboxItem } from "./mother.js";
-import type { EventsFilter, JeeroEvent, StoredSubscription, SubscriptionEnvelope } from "./types.js";
+import type {
+  EventsFilter,
+  JeeroEvent,
+  StoredSubscription,
+  SubscriptionEnvelope,
+  TicketSnapshotsFilter,
+} from "./types.js";
 
 const configSubscriptionSchema = z.object({
   settings: z.record(z.unknown()),
@@ -27,12 +33,23 @@ const logsFilterSchema = z.object({
   limit: z.number().int().positive().max(1000).optional(),
 });
 
+const ticketSnapshotsFilterSchema = z.object({
+  date: z.string().optional(),
+  from: z.string().optional(),
+  to: z.string().optional(),
+  theater: z.string().optional(),
+  ref: z.string().optional(),
+  query: z.string().optional(),
+  limit: z.number().int().positive().max(1000).optional(),
+});
+
 export async function startServer(config: JeeroConfig): Promise<void> {
   const db = new JeeroDatabase(config.databasePath);
   const identity = loadOrCreateSiteIdentity(config);
   const mother = new MotherClient(config, identity.siteKey, identity.siteIdentifier);
 
   const app = new JeeroService(db, mother, identity.siteKey, identity.siteIdentifier);
+  const backgroundSync = app.startBackgroundSync();
 
   const server = new McpServer({
     name: "jeero-agent-plugin",
@@ -84,8 +101,24 @@ export async function startServer(config: JeeroConfig): Promise<void> {
     },
   );
 
+  server.registerTool(
+    "get_ticket_snapshots",
+    {
+      description:
+        "Return daily historical ticket snapshots based on event ticket totals and availability.",
+      inputSchema: ticketSnapshotsFilterSchema.shape,
+    },
+    async (input) => {
+      const parsed = ticketSnapshotsFilterSchema.parse(input);
+      return toolResult(await app.getTicketSnapshots(parsed));
+    },
+  );
+
   const transport = new StdioServerTransport();
-  const closeDb = () => db.close();
+  const closeDb = () => {
+    backgroundSync.stop();
+    db.close();
+  };
   process.once("SIGINT", closeDb);
   process.once("SIGTERM", closeDb);
   await server.connect(transport);
@@ -107,12 +140,39 @@ function toolResult<T extends Record<string, unknown>>(payload: T): {
 }
 
 class JeeroService {
+  private backgroundSyncTimer: NodeJS.Timeout | null = null;
+  private syncInFlight: Promise<boolean> | null = null;
+
   public constructor(
     private readonly db: JeeroDatabase,
     private readonly mother: MotherClient,
     private readonly siteKey: string,
     private readonly siteIdentifier: string,
   ) {}
+
+  public startBackgroundSync(): { stop: () => void } {
+    const run = async (): Promise<void> => {
+      try {
+        await this.syncInboxIfNeeded({ force: true, skipSubscriptionCreation: true });
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.stack ?? error.message : String(error);
+        process.stderr.write(`Background sync failed: ${message}\n`);
+      }
+    };
+
+    this.backgroundSyncTimer = setInterval(() => {
+      void run();
+    }, 60_000);
+
+    return {
+      stop: () => {
+        if (this.backgroundSyncTimer) {
+          clearInterval(this.backgroundSyncTimer);
+          this.backgroundSyncTimer = null;
+        }
+      },
+    };
+  }
 
   public async getSubscriptionEnvelope(): Promise<SubscriptionEnvelope> {
     const subscription = await this.ensureSubscription();
@@ -223,6 +283,28 @@ class JeeroService {
     };
   }
 
+  public async getTicketSnapshots(filter: TicketSnapshotsFilter): Promise<{
+    count: number;
+    snapshots: Array<Record<string, unknown>>;
+  }> {
+    const snapshots = this.db.getTicketSnapshots(filter).map((snapshot) => ({
+      snapshot_date: snapshot.snapshotDate,
+      theater: snapshot.theater,
+      ref: snapshot.ref,
+      start: snapshot.start,
+      production_title: snapshot.productionTitle,
+      total_tickets: snapshot.totalTickets,
+      available_tickets: snapshot.availableTickets,
+      sold_tickets: snapshot.soldTickets,
+      updated_at: snapshot.updatedAt,
+    }));
+
+    return {
+      count: snapshots.length,
+      snapshots,
+    };
+  }
+
   private async ensureSubscription(): Promise<StoredSubscription> {
     const existing = this.db.getSubscription();
     if (existing) {
@@ -238,12 +320,39 @@ class JeeroService {
     });
   }
 
-  private async syncInboxIfNeeded(): Promise<boolean> {
-    const subscription = await this.ensureSubscription();
+  private async syncInboxIfNeeded(options?: {
+    force?: boolean;
+    skipSubscriptionCreation?: boolean;
+  }): Promise<boolean> {
+    if (this.syncInFlight) {
+      return this.syncInFlight;
+    }
+
+    const work = this.runSyncInboxIfNeeded(options);
+    this.syncInFlight = work;
+
+    try {
+      return await work;
+    } finally {
+      this.syncInFlight = null;
+    }
+  }
+
+  private async runSyncInboxIfNeeded(options?: {
+    force?: boolean;
+    skipSubscriptionCreation?: boolean;
+  }): Promise<boolean> {
+    const subscription = options?.skipSubscriptionCreation
+      ? this.db.getSubscription()
+      : await this.ensureSubscription();
+    if (!subscription) {
+      return false;
+    }
+
     const lastCheck = this.db.getSyncState("last_inbox_check_at");
     const now = new Date();
 
-    if (lastCheck) {
+    if (!options?.force && lastCheck) {
       const diff = now.getTime() - new Date(lastCheck).getTime();
       if (diff < 60_000) {
         return false;

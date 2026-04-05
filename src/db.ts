@@ -1,6 +1,14 @@
 import Database from "better-sqlite3";
 
-import type { EventRecord, EventsFilter, JeeroEvent, LogRecord, StoredSubscription } from "./types.js";
+import type {
+  EventRecord,
+  EventsFilter,
+  JeeroEvent,
+  LogRecord,
+  StoredSubscription,
+  TicketSnapshotRecord,
+  TicketSnapshotsFilter,
+} from "./types.js";
 
 interface SubscriptionRow {
   id: number;
@@ -33,6 +41,19 @@ interface LogRow {
   theater: string;
   action: string;
   message: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface TicketSnapshotRow {
+  snapshot_date: string;
+  theater: string;
+  ref: string;
+  start: string | null;
+  production_title: string;
+  total_tickets: number;
+  available_tickets: number;
+  sold_tickets: number;
   created_at: string;
   updated_at: string;
 }
@@ -169,6 +190,8 @@ export class JeeroDatabase {
         now,
         now,
       );
+
+    this.upsertTicketSnapshot(theater, event, now);
   }
 
   public getEvents(filter: EventsFilter): EventRecord[] {
@@ -299,6 +322,68 @@ export class JeeroDatabase {
     }));
   }
 
+  public getTicketSnapshots(filter: TicketSnapshotsFilter): TicketSnapshotRecord[] {
+    const where: string[] = [];
+    const params: unknown[] = [];
+
+    if (filter.date) {
+      where.push("snapshot_date = ?");
+      params.push(filter.date);
+    } else {
+      if (filter.from) {
+        where.push("snapshot_date >= ?");
+        params.push(filter.from);
+      }
+      if (filter.to) {
+        where.push("snapshot_date <= ?");
+        params.push(filter.to);
+      }
+    }
+
+    if (filter.theater) {
+      where.push("theater = ?");
+      params.push(filter.theater);
+    }
+
+    if (filter.ref) {
+      where.push("ref = ?");
+      params.push(filter.ref);
+    }
+
+    if (filter.query) {
+      where.push("production_title LIKE ?");
+      params.push(`%${filter.query}%`);
+    }
+
+    const sql = [
+      "SELECT snapshot_date, theater, ref, start, production_title, total_tickets, available_tickets, sold_tickets, created_at, updated_at",
+      "FROM ticket_snapshots",
+      where.length > 0 ? `WHERE ${where.join(" AND ")}` : "",
+      "ORDER BY snapshot_date DESC, datetime(start) ASC, theater ASC, ref ASC",
+      filter.limit ? "LIMIT ?" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    if (filter.limit) {
+      params.push(filter.limit);
+    }
+
+    const rows = this.db.prepare(sql).all(...params) as TicketSnapshotRow[];
+    return rows.map((row) => ({
+      snapshotDate: row.snapshot_date,
+      theater: row.theater,
+      ref: row.ref,
+      start: row.start ?? undefined,
+      productionTitle: row.production_title,
+      totalTickets: row.total_tickets,
+      availableTickets: row.available_tickets,
+      soldTickets: row.sold_tickets,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
   private migrate(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS subscription (
@@ -343,7 +428,61 @@ export class JeeroDatabase {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS ticket_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        snapshot_date TEXT NOT NULL,
+        theater TEXT NOT NULL,
+        ref TEXT NOT NULL,
+        start TEXT,
+        production_title TEXT NOT NULL,
+        total_tickets INTEGER NOT NULL,
+        available_tickets INTEGER NOT NULL,
+        sold_tickets INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(snapshot_date, theater, ref)
+      );
     `);
+  }
+
+  private upsertTicketSnapshot(theater: string, event: JeeroEvent, now: string): void {
+    const totalTickets = asInteger(event.tickets?.total);
+    const availableTickets = asInteger(event.tickets?.available);
+    if (totalTickets === null || availableTickets === null) {
+      return;
+    }
+
+    const soldTickets = Math.max(0, totalTickets - availableTickets);
+    const snapshotDate = new Date(now).toLocaleDateString("en-CA", {
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+    });
+
+    this.db
+      .prepare(
+        `INSERT INTO ticket_snapshots
+           (snapshot_date, theater, ref, start, production_title, total_tickets, available_tickets, sold_tickets, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(snapshot_date, theater, ref) DO UPDATE SET
+           start = excluded.start,
+           production_title = excluded.production_title,
+           total_tickets = excluded.total_tickets,
+           available_tickets = excluded.available_tickets,
+           sold_tickets = excluded.sold_tickets,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        snapshotDate,
+        theater,
+        event.ref,
+        event.start ?? null,
+        event.production.title,
+        totalTickets,
+        availableTickets,
+        soldTickets,
+        now,
+        now,
+      );
   }
 }
 
@@ -361,4 +500,12 @@ function parseJson<T>(value: string | null): T | undefined {
   }
 
   return JSON.parse(value) as T;
+}
+
+function asInteger(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+
+  return null;
 }

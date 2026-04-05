@@ -11,6 +11,8 @@ export interface JeeroConfig {
   siteIdentifier: string;
   noOfItemsPerPickup?: number;
   defaultTimezone: string;
+  motherTraceEnabled: boolean;
+  motherTracePath: string;
 }
 
 interface SiteIdentityFile {
@@ -52,6 +54,9 @@ export function loadConfig(): JeeroConfig {
       ? Number(process.env.JEERO_NO_OF_ITEMS_PER_PICKUP)
       : undefined,
     defaultTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+    motherTraceEnabled: isTruthy(process.env.JEERO_LOG_MOTHER),
+    motherTracePath:
+      process.env.JEERO_LOG_MOTHER_FILE?.trim() || path.join(dataDir, "mother-trace.log"),
   };
 }
 
@@ -72,4 +77,12 @@ export function loadOrCreateSiteIdentity(config: JeeroConfig): SiteIdentityFile 
 
   fs.writeFileSync(config.siteIdentityPath, JSON.stringify(identity, null, 2));
   return identity;
+}
+
+function isTruthy(value: string | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+
+  return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
 }

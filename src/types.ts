@@ -69,12 +69,35 @@ export interface LogRecord {
   updatedAt: string;
 }
 
+export interface TicketSnapshotRecord {
+  snapshotDate: string;
+  theater: string;
+  ref: string;
+  start?: string;
+  productionTitle: string;
+  totalTickets: number;
+  availableTickets: number;
+  soldTickets: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface EventsFilter {
   from?: string;
   to?: string;
   date?: string;
   status?: string;
   theater?: string;
+  query?: string;
+  limit?: number;
+}
+
+export interface TicketSnapshotsFilter {
+  date?: string;
+  from?: string;
+  to?: string;
+  theater?: string;
+  ref?: string;
   query?: string;
   limit?: number;
 }

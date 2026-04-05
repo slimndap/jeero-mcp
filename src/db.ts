@@ -1,0 +1,284 @@
+import Database from "better-sqlite3";
+
+import type { EventRecord, EventsFilter, JeeroEvent, StoredSubscription } from "./types.js";
+
+interface SubscriptionRow {
+  id: number;
+  mother_subscription_id: string;
+  settings_json: string;
+  site_key: string;
+  site_identifier: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface EventRow {
+  theater: string;
+  ref: string;
+  start: string;
+  end: string | null;
+  status: string | null;
+  tickets_json: string | null;
+  prices_json: string | null;
+  venue_json: string | null;
+  production_json: string;
+  custom_json: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export class JeeroDatabase {
+  private readonly db: Database.Database;
+
+  public constructor(databasePath: string) {
+    this.db = new Database(databasePath);
+    this.db.pragma("journal_mode = WAL");
+    this.migrate();
+  }
+
+  public close(): void {
+    this.db.close();
+  }
+
+  public getSubscription(): StoredSubscription | null {
+    const row = this.db
+      .prepare("SELECT * FROM subscription ORDER BY id ASC LIMIT 1")
+      .get() as SubscriptionRow | undefined;
+
+    if (!row) {
+      return null;
+    }
+
+    return {
+      id: row.id,
+      motherSubscriptionId: row.mother_subscription_id,
+      settings: JSON.parse(row.settings_json),
+      siteKey: row.site_key,
+      siteIdentifier: row.site_identifier,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  public upsertSubscription(input: {
+    motherSubscriptionId: string;
+    settings: Record<string, unknown>;
+    siteKey: string;
+    siteIdentifier: string;
+  }): StoredSubscription {
+    const existing = this.getSubscription();
+    const now = new Date().toISOString();
+
+    if (existing) {
+      this.db
+        .prepare(
+          `UPDATE subscription
+           SET mother_subscription_id = ?, settings_json = ?, site_key = ?, site_identifier = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          input.motherSubscriptionId,
+          JSON.stringify(input.settings),
+          input.siteKey,
+          input.siteIdentifier,
+          now,
+          existing.id,
+        );
+    } else {
+      this.db
+        .prepare(
+          `INSERT INTO subscription
+             (mother_subscription_id, settings_json, site_key, site_identifier, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          input.motherSubscriptionId,
+          JSON.stringify(input.settings),
+          input.siteKey,
+          input.siteIdentifier,
+          now,
+          now,
+        );
+    }
+
+    const subscription = this.getSubscription();
+    if (!subscription) {
+      throw new Error("Failed to persist subscription.");
+    }
+
+    return subscription;
+  }
+
+  public getSyncState(key: string): string | null {
+    const row = this.db
+      .prepare("SELECT value FROM sync_state WHERE key = ?")
+      .get(key) as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
+  public setSyncState(key: string, value: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO sync_state (key, value)
+         VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      )
+      .run(key, value);
+  }
+
+  public upsertEvent(theater: string, event: JeeroEvent): void {
+    const now = new Date().toISOString();
+
+    this.db
+      .prepare(
+        `INSERT INTO events
+           (theater, ref, start, end, status, tickets_json, prices_json, venue_json, production_json, custom_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(theater, ref) DO UPDATE SET
+           start = excluded.start,
+           end = excluded.end,
+           status = excluded.status,
+           tickets_json = excluded.tickets_json,
+           prices_json = excluded.prices_json,
+           venue_json = excluded.venue_json,
+           production_json = excluded.production_json,
+           custom_json = excluded.custom_json,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        theater,
+        event.ref,
+        event.start,
+        event.end ?? null,
+        event.status ?? null,
+        jsonOrNull(event.tickets),
+        jsonOrNull(event.prices),
+        jsonOrNull(event.venue),
+        JSON.stringify(event.production),
+        jsonOrNull(event.custom),
+        now,
+        now,
+      );
+  }
+
+  public getEvents(filter: EventsFilter): EventRecord[] {
+    const where: string[] = [];
+    const params: unknown[] = [];
+
+    if (filter.date) {
+      where.push("date(start) = date(?)");
+      params.push(filter.date);
+    } else {
+      if (filter.from) {
+        where.push("datetime(start) >= datetime(?)");
+        params.push(filter.from);
+      }
+      if (filter.to) {
+        where.push("datetime(start) <= datetime(?)");
+        params.push(filter.to);
+      }
+    }
+
+    if (filter.status) {
+      where.push("status = ?");
+      params.push(filter.status);
+    }
+
+    if (filter.theater) {
+      where.push("theater = ?");
+      params.push(filter.theater);
+    }
+
+    if (filter.query) {
+      where.push(
+        "(json_extract(production_json, '$.title') LIKE ? OR json_extract(production_json, '$.description') LIKE ?)",
+      );
+      const like = `%${filter.query}%`;
+      params.push(like, like);
+    }
+
+    const sql = [
+      "SELECT theater, ref, start, end, status, tickets_json, prices_json, venue_json, production_json, custom_json, created_at, updated_at",
+      "FROM events",
+      where.length > 0 ? `WHERE ${where.join(" AND ")}` : "",
+      "ORDER BY datetime(start) ASC",
+      filter.limit ? "LIMIT ?" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    if (filter.limit) {
+      params.push(filter.limit);
+    }
+
+    const rows = this.db.prepare(sql).all(...params) as EventRow[];
+    return rows.map((row) => ({
+      theater: row.theater,
+      event: {
+        ref: row.ref,
+        start: row.start,
+        end: row.end ?? undefined,
+        status: row.status ?? undefined,
+        tickets: parseJson<JeeroEvent["tickets"]>(row.tickets_json),
+        prices: parseJson<JeeroEvent["prices"]>(row.prices_json),
+        venue: parseJson<JeeroEvent["venue"]>(row.venue_json),
+        production: JSON.parse(row.production_json),
+        custom: parseJson<JeeroEvent["custom"]>(row.custom_json) ?? {},
+      },
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  private migrate(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS subscription (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        mother_subscription_id TEXT NOT NULL,
+        settings_json TEXT NOT NULL,
+        site_key TEXT NOT NULL,
+        site_identifier TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        theater TEXT NOT NULL,
+        ref TEXT NOT NULL,
+        start TEXT NOT NULL,
+        end TEXT,
+        status TEXT,
+        tickets_json TEXT,
+        prices_json TEXT,
+        venue_json TEXT,
+        production_json TEXT NOT NULL,
+        custom_json TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(theater, ref)
+      );
+
+      CREATE TABLE IF NOT EXISTS sync_state (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+    `);
+  }
+}
+
+function jsonOrNull(value: unknown): string | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  return JSON.stringify(value);
+}
+
+function parseJson<T>(value: string | null): T | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  return JSON.parse(value) as T;
+}

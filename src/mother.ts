@@ -142,7 +142,6 @@ export class MotherClient {
       url,
       status: response.status,
       statusText: response.statusText,
-      body: responseBody,
     });
 
     if (!response.ok) {

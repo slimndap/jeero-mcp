@@ -22,6 +22,11 @@ const eventsFilterSchema = z.object({
   limit: z.number().int().positive().max(1000).optional(),
 });
 
+const logsFilterSchema = z.object({
+  theater: z.string().optional(),
+  limit: z.number().int().positive().max(1000).optional(),
+});
+
 export async function startServer(config: JeeroConfig): Promise<void> {
   const db = new JeeroDatabase(config.databasePath);
   const identity = loadOrCreateSiteIdentity(config);
@@ -64,6 +69,18 @@ export async function startServer(config: JeeroConfig): Promise<void> {
     async (input) => {
       const parsed = eventsFilterSchema.parse(input);
       return toolResult(await app.getEvents(parsed));
+    },
+  );
+
+  server.registerTool(
+    "get_logs",
+    {
+      description: "Return recently imported Jeero inbox log messages, optionally filtered by theater.",
+      inputSchema: logsFilterSchema.shape,
+    },
+    async (input) => {
+      const parsed = logsFilterSchema.parse(input);
+      return toolResult(await app.getLogs(parsed));
     },
   );
 
@@ -156,6 +173,7 @@ class JeeroService {
     lastInboxCheckAt: string | null;
     count: number;
     events: Array<Record<string, unknown>>;
+    logs: Array<Record<string, unknown>>;
   }> {
     const refreshed = await this.syncInboxIfNeeded();
 
@@ -164,6 +182,14 @@ class JeeroService {
       updated_at: record.updatedAt,
       ...record.event,
     }));
+    const logs = this.db.getRecentLogs(20, filter.theater).map((log) => ({
+      inbox_id: log.inboxId,
+      subscription_id: log.subscriptionId,
+      theater: log.theater,
+      action: log.action,
+      message: log.message,
+      updated_at: log.updatedAt,
+    }));
     const lastInboxCheckAt = this.db.getSyncState("last_inbox_check_at");
 
     return {
@@ -171,6 +197,29 @@ class JeeroService {
       lastInboxCheckAt,
       count: events.length,
       events,
+      logs,
+    };
+  }
+
+  public async getLogs(filter: {
+    theater?: string;
+    limit?: number;
+  }): Promise<{
+    count: number;
+    logs: Array<Record<string, unknown>>;
+  }> {
+    const logs = this.db.getRecentLogs(filter.limit ?? 20, filter.theater).map((log) => ({
+      inbox_id: log.inboxId,
+      subscription_id: log.subscriptionId,
+      theater: log.theater,
+      action: log.action,
+      message: log.message,
+      updated_at: log.updatedAt,
+    }));
+
+    return {
+      count: logs.length,
+      logs,
     };
   }
 
@@ -208,13 +257,16 @@ class JeeroService {
     const processedIds: string[] = [];
 
     for (const item of inboxItems) {
-      const processed = this.processInboxItem(item);
-      if (!processed) {
+      if (this.processLogItem(item, subscription.motherSubscriptionId)) {
+        processedIds.push(item.id);
         continue;
       }
 
-      this.db.upsertEvent(processed.theater, processed.event);
-      processedIds.push(item.id);
+      const processedEvent = this.processEventItem(item);
+      if (processedEvent) {
+        this.db.upsertEvent(processedEvent.theater, processedEvent.event);
+        processedIds.push(item.id);
+      }
     }
 
     if (processedIds.length > 0) {
@@ -225,7 +277,7 @@ class JeeroService {
     return true;
   }
 
-  private processInboxItem(item: MotherInboxItem): { theater: string; event: JeeroEvent } | null {
+  private processEventItem(item: MotherInboxItem): { theater: string; event: JeeroEvent } | null {
     const candidate = extractEventLike(item);
     if (!candidate) {
       return null;
@@ -243,6 +295,26 @@ class JeeroService {
 
     return { theater, event };
   }
+
+  private processLogItem(item: MotherInboxItem, fallbackSubscriptionId: string): boolean {
+    if (item.item !== "log" || !item.id) {
+      return false;
+    }
+
+    const message = extractLogMessage(item.data);
+    if (!message) {
+      return false;
+    }
+
+    this.db.upsertLog({
+      inboxId: item.id,
+      subscriptionId: item.subscription_id ?? fallbackSubscriptionId,
+      theater: typeof item.theater === "string" ? item.theater : "",
+      action: typeof item.action === "string" ? item.action : "",
+      message,
+    });
+    return true;
+  }
 }
 
 function inferTheater(item: MotherInboxItem, event: JeeroEvent): string | null {
@@ -254,8 +326,16 @@ function inferTheater(item: MotherInboxItem, event: JeeroEvent): string | null {
 }
 
 function extractEventLike(item: MotherInboxItem): unknown {
+  if (item.item === "log") {
+    return null;
+  }
+
   if (item.event) {
     return item.event;
+  }
+
+  if (item.item === "event" && item.data && typeof item.data === "object") {
+    return item.data;
   }
 
   if (item.payload && typeof item.payload === "object") {
@@ -264,6 +344,15 @@ function extractEventLike(item: MotherInboxItem): unknown {
   }
 
   return null;
+}
+
+function extractLogMessage(data: unknown): string | null {
+  if (!data || typeof data !== "object") {
+    return null;
+  }
+
+  const message = (data as Record<string, unknown>).message;
+  return typeof message === "string" && message.length > 0 ? message : null;
 }
 
 function validateEvent(value: unknown): JeeroEvent | null {

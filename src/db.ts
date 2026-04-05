@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 
-import type { EventRecord, EventsFilter, JeeroEvent, StoredSubscription } from "./types.js";
+import type { EventRecord, EventsFilter, JeeroEvent, LogRecord, StoredSubscription } from "./types.js";
 
 interface SubscriptionRow {
   id: number;
@@ -23,6 +23,16 @@ interface EventRow {
   venue_json: string | null;
   production_json: string;
   custom_json: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface LogRow {
+  inbox_id: string;
+  subscription_id: string;
+  theater: string;
+  action: string;
+  message: string;
   created_at: string;
   updated_at: string;
 }
@@ -230,6 +240,65 @@ export class JeeroDatabase {
     }));
   }
 
+  public upsertLog(input: {
+    inboxId: string;
+    subscriptionId: string;
+    theater: string;
+    action: string;
+    message: string;
+  }): void {
+    const now = new Date().toISOString();
+
+    this.db
+      .prepare(
+        `INSERT INTO logs
+           (inbox_id, subscription_id, theater, action, message, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(inbox_id) DO UPDATE SET
+           subscription_id = excluded.subscription_id,
+           theater = excluded.theater,
+           action = excluded.action,
+           message = excluded.message,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        input.inboxId,
+        input.subscriptionId,
+        input.theater,
+        input.action,
+        input.message,
+        now,
+        now,
+      );
+  }
+
+  public getRecentLogs(limit = 20, theater?: string): LogRecord[] {
+    const sql = theater
+      ? `SELECT inbox_id, subscription_id, theater, action, message, created_at, updated_at
+         FROM logs
+         WHERE theater = ?
+         ORDER BY datetime(updated_at) DESC
+         LIMIT ?`
+      : `SELECT inbox_id, subscription_id, theater, action, message, created_at, updated_at
+         FROM logs
+         ORDER BY datetime(updated_at) DESC
+         LIMIT ?`;
+
+    const rows = (theater
+      ? this.db.prepare(sql).all(theater, limit)
+      : this.db.prepare(sql).all(limit)) as LogRow[];
+
+    return rows.map((row) => ({
+      inboxId: row.inbox_id,
+      subscriptionId: row.subscription_id,
+      theater: row.theater,
+      action: row.action,
+      message: row.message,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
   private migrate(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS subscription (
@@ -262,6 +331,17 @@ export class JeeroDatabase {
       CREATE TABLE IF NOT EXISTS sync_state (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        inbox_id TEXT NOT NULL UNIQUE,
+        subscription_id TEXT NOT NULL,
+        theater TEXT NOT NULL DEFAULT '',
+        action TEXT NOT NULL DEFAULT '',
+        message TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
       );
     `);
   }

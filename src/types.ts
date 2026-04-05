@@ -59,6 +59,16 @@ export interface EventRecord {
   updatedAt: string;
 }
 
+export interface LogRecord {
+  inboxId: string;
+  subscriptionId: string;
+  theater: string;
+  action: string;
+  message: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface EventsFilter {
   from?: string;
   to?: string;

@@ -9,6 +9,11 @@ export interface MotherSubscriptionResponse {
 
 export interface MotherInboxItem {
   id: string;
+  subscription_id?: string;
+  action?: string;
+  item?: string;
+  data?: unknown;
+  raw?: unknown;
   theater?: string;
   event?: unknown;
   payload?: unknown;
@@ -174,7 +179,7 @@ function parseSubscriptionResponse(
 
 function extractInboxItems(raw: unknown): MotherInboxItem[] {
   if (Array.isArray(raw)) {
-    return raw.filter(isObject) as MotherInboxItem[];
+    return raw.filter(isObject).map(normalizeInboxItem);
   }
 
   if (!isObject(raw)) {
@@ -183,10 +188,28 @@ function extractInboxItems(raw: unknown): MotherInboxItem[] {
 
   const candidate = raw.items ?? raw.inbox ?? raw.results;
   if (Array.isArray(candidate)) {
-    return candidate.filter(isObject) as MotherInboxItem[];
+    return candidate.filter(isObject).map(normalizeInboxItem);
   }
 
   return [];
+}
+
+function normalizeInboxItem(value: Record<string, unknown>): MotherInboxItem {
+  return {
+    ...value,
+    id:
+      asOptionalString(value.ID) ??
+      asOptionalString(value.id) ??
+      asOptionalString(value.inbox_id) ??
+      "",
+    subscription_id:
+      asOptionalString(value.subscription_id) ?? asOptionalString(value.subscriptionId),
+    item: asOptionalString(value.item),
+    action: asOptionalString(value.action),
+    theater: asOptionalString(value.theater),
+    data: value.data,
+    raw: value.raw,
+  };
 }
 
 function pickObject(source: Record<string, unknown>, keys: string[]): Record<string, unknown> {

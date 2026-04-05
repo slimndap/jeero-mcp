@@ -266,6 +266,11 @@ class JeeroService {
       if (processedEvent) {
         this.db.upsertEvent(processedEvent.theater, processedEvent.event);
         processedIds.push(item.id);
+        continue;
+      }
+
+      if (item.id) {
+        processedIds.push(item.id);
       }
     }
 
@@ -297,7 +302,8 @@ class JeeroService {
   }
 
   private processLogItem(item: MotherInboxItem, fallbackSubscriptionId: string): boolean {
-    if (item.item !== "log" || !item.id) {
+    const isLogItem = item.item === "log" || item.action === "log";
+    if (!isLogItem || !item.id) {
       return false;
     }
 
@@ -326,7 +332,7 @@ function inferTheater(item: MotherInboxItem, event: JeeroEvent): string | null {
 }
 
 function extractEventLike(item: MotherInboxItem): unknown {
-  if (item.item === "log") {
+  if (item.item === "log" || item.action === "log") {
     return null;
   }
 

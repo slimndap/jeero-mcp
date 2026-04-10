@@ -89,7 +89,15 @@ export interface EventsFilter {
   status?: string;
   theater?: string;
   query?: string;
+  page?: number;
   limit?: number;
+}
+
+export interface PaginatedEventsResult {
+  total: number;
+  page: number;
+  limit: number;
+  events: EventRecord[];
 }
 
 export interface TicketSnapshotsFilter {

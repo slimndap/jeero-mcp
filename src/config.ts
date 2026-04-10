@@ -7,6 +7,7 @@ export interface JeeroConfig {
   motherBaseUrl: string;
   dataDir: string;
   databasePath: string;
+  imageCacheDir: string;
   siteIdentityPath: string;
   siteIdentifier: string;
   noOfItemsPerPickup?: number;
@@ -48,6 +49,7 @@ export function loadConfig(): JeeroConfig {
     motherBaseUrl: motherBaseUrl.replace(/\/+$/, ""),
     dataDir,
     databasePath: path.join(dataDir, "jeero.sqlite"),
+    imageCacheDir: path.join(dataDir, "event-images"),
     siteIdentityPath: path.join(dataDir, "site-identity.json"),
     siteIdentifier,
     noOfItemsPerPickup: process.env.JEERO_NO_OF_ITEMS_PER_PICKUP

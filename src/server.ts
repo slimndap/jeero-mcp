@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import fs from "node:fs";
 import { z } from "zod";
 
 import { JeeroDatabase } from "./db.js";
@@ -25,6 +26,7 @@ const eventsFilterSchema = z.object({
   status: z.string().optional(),
   theater: z.string().optional(),
   query: z.string().optional(),
+  page: z.number().int().positive().optional(),
   limit: z.number().int().positive().max(1000).optional(),
 });
 
@@ -41,6 +43,11 @@ const ticketSnapshotsFilterSchema = z.object({
   ref: z.string().optional(),
   query: z.string().optional(),
   limit: z.number().int().positive().max(1000).optional(),
+});
+
+const eventImageSchema = z.object({
+  ref: z.string().min(1),
+  theater: z.string().min(1).optional(),
 });
 
 export async function startServer(config: JeeroConfig): Promise<void> {
@@ -80,7 +87,8 @@ export async function startServer(config: JeeroConfig): Promise<void> {
   server.registerTool(
     "get_events",
     {
-      description: "Return locally stored Jeero events, lazily syncing from Mother at most once per minute.",
+      description:
+        "Return paginated locally stored Jeero events, lazily syncing from Mother at most once per minute.",
       inputSchema: eventsFilterSchema.shape,
     },
     async (input) => {
@@ -114,13 +122,39 @@ export async function startServer(config: JeeroConfig): Promise<void> {
     },
   );
 
+  server.registerTool(
+    "get_event_image",
+    {
+      description:
+        "Download and cache only the production image of a locally stored Jeero event identified by ref and optional theater. Returns the image bytes inline as an embedded MCP resource, never as a filesystem path.",
+      inputSchema: eventImageSchema.shape,
+    },
+    async (input) => {
+      const parsed = eventImageSchema.parse(input);
+      return await app.getEventImage(parsed.ref, parsed.theater);
+    },
+  );
+
   const transport = new StdioServerTransport();
+  let isClosed = false;
   const closeDb = () => {
+    if (isClosed) {
+      return;
+    }
+    isClosed = true;
     backgroundSync.stop();
     db.close();
   };
+
+  const shutdown = () => {
+    closeDb();
+    process.exit(0);
+  };
+
   process.once("SIGINT", closeDb);
   process.once("SIGTERM", closeDb);
+  process.stdin.once("end", shutdown);
+  process.stdin.once("close", shutdown);
   await server.connect(transport);
 }
 
@@ -163,6 +197,7 @@ class JeeroService {
     this.backgroundSyncTimer = setInterval(() => {
       void run();
     }, 60_000);
+    this.backgroundSyncTimer.unref();
 
     return {
       stop: () => {
@@ -231,13 +266,27 @@ class JeeroService {
   public async getEvents(filter: EventsFilter): Promise<{
     refreshed: boolean;
     lastInboxCheckAt: string | null;
+    syncError: string | null;
     count: number;
+    total: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+    hasNextPage: boolean;
+    hasPreviousPage: boolean;
     events: Array<Record<string, unknown>>;
     logs: Array<Record<string, unknown>>;
   }> {
-    const refreshed = await this.syncInboxIfNeeded();
+    let refreshed = false;
+    let syncError: string | null = null;
+    try {
+      refreshed = await this.syncInboxIfNeeded();
+    } catch (error: unknown) {
+      syncError = error instanceof Error ? error.message : String(error);
+    }
 
-    const events = this.db.getEvents(filter).map((record) => ({
+    const pageResult = this.db.getEvents(filter);
+    const events = pageResult.events.map((record) => ({
       theater: record.theater,
       updated_at: record.updatedAt,
       ...record.event,
@@ -255,7 +304,14 @@ class JeeroService {
     return {
       refreshed,
       lastInboxCheckAt,
+      syncError,
       count: events.length,
+      total: pageResult.total,
+      page: pageResult.page,
+      limit: pageResult.limit,
+      totalPages: Math.ceil(pageResult.total / pageResult.limit),
+      hasNextPage: pageResult.page * pageResult.limit < pageResult.total,
+      hasPreviousPage: pageResult.page > 1,
       events,
       logs,
     };
@@ -302,6 +358,78 @@ class JeeroService {
     return {
       count: snapshots.length,
       snapshots,
+    };
+  }
+
+  public async getEventImage(ref: string, theater?: string): Promise<{
+    content: Array<
+      | { type: "text"; text: string }
+      | { type: "resource"; resource: { uri: string; mimeType: string; blob: string } }
+    >;
+    structuredContent: Record<string, unknown>;
+  }> {
+    await this.syncInboxIfNeeded();
+
+    const matchingCount = this.db.countEventsByRef(ref, theater);
+    if (matchingCount === 0) {
+      throw new Error(`No locally stored event found for ref "${ref}".`);
+    }
+
+    if (!theater && matchingCount > 1) {
+      throw new Error(
+        `Multiple events found for ref "${ref}". Pass the theater to disambiguate which event image to use.`,
+      );
+    }
+
+    const record = this.db.getEventByRef(ref, theater);
+    if (!record) {
+      throw new Error(`No locally stored event found for ref "${ref}".`);
+    }
+
+    const imageUrl = record.event.production.img;
+    if (typeof imageUrl !== "string" || imageUrl.length === 0) {
+      throw new Error(`Event "${ref}" does not have a production image.`);
+    }
+
+    const cachedImage = await this.mother.cacheEventImage(imageUrl);
+    const imageBuffer = fs.readFileSync(cachedImage.filePath);
+    const imageBase64 = imageBuffer.toString("base64");
+    const resourceUri = `jeero://event-image/${encodeURIComponent(record.theater)}/${encodeURIComponent(record.event.ref)}`;
+    const metadata = {
+      ref: record.event.ref,
+      theater: record.theater,
+      production_title: record.event.production.title,
+      source_url: cachedImage.sourceUrl,
+      mime_type: cachedImage.mimeType,
+      size_bytes: cachedImage.sizeBytes,
+      cached: cachedImage.cached,
+      updated_at: record.updatedAt,
+    };
+    const deliveryMetadata = {
+      ...metadata,
+      delivery: "embedded_resource",
+      resource_uri: resourceUri,
+      image_base64: imageBase64,
+      usage:
+        "Use image_base64 or the embedded MCP resource from this tool result. Do not expect or infer a host filesystem path.",
+    };
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(deliveryMetadata, null, 2),
+        },
+        {
+          type: "resource",
+          resource: {
+            uri: resourceUri,
+            mimeType: cachedImage.mimeType,
+            blob: imageBase64,
+          },
+        },
+      ],
+      structuredContent: deliveryMetadata,
     };
   }
 

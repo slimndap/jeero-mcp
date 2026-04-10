@@ -5,6 +5,7 @@ import type {
   EventsFilter,
   JeeroEvent,
   LogRecord,
+  PaginatedEventsResult,
   StoredSubscription,
   TicketSnapshotRecord,
   TicketSnapshotsFilter,
@@ -194,7 +195,7 @@ export class JeeroDatabase {
     this.upsertTicketSnapshot(theater, event, now);
   }
 
-  public getEvents(filter: EventsFilter): EventRecord[] {
+  public getEvents(filter: EventsFilter): PaginatedEventsResult {
     const where: string[] = [];
     const params: unknown[] = [];
 
@@ -230,37 +231,70 @@ export class JeeroDatabase {
       params.push(like, like);
     }
 
-    const sql = [
-      "SELECT theater, ref, start, end, status, tickets_json, prices_json, venue_json, production_json, custom_json, created_at, updated_at",
+    const whereClause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+    const limit = filter.limit ?? 100;
+    const page = filter.page ?? 1;
+    const offset = (page - 1) * limit;
+
+    const countSql = [
+      "SELECT COUNT(*) as total",
       "FROM events",
-      where.length > 0 ? `WHERE ${where.join(" AND ")}` : "",
-      "ORDER BY datetime(start) ASC",
-      filter.limit ? "LIMIT ?" : "",
+      whereClause,
     ]
       .filter(Boolean)
       .join(" ");
 
-    if (filter.limit) {
-      params.push(filter.limit);
-    }
+    const totalRow = this.db.prepare(countSql).get(...params) as { total: number };
 
-    const rows = this.db.prepare(sql).all(...params) as EventRow[];
-    return rows.map((row) => ({
-      theater: row.theater,
-      event: {
-        ref: row.ref,
-        start: row.start,
-        end: row.end ?? undefined,
-        status: row.status ?? undefined,
-        tickets: parseJson<JeeroEvent["tickets"]>(row.tickets_json),
-        prices: parseJson<JeeroEvent["prices"]>(row.prices_json),
-        venue: parseJson<JeeroEvent["venue"]>(row.venue_json),
-        production: JSON.parse(row.production_json),
-        custom: parseJson<JeeroEvent["custom"]>(row.custom_json) ?? {},
-      },
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    }));
+    const sql = [
+      "SELECT theater, ref, start, end, status, tickets_json, prices_json, venue_json, production_json, custom_json, created_at, updated_at",
+      "FROM events",
+      whereClause,
+      "ORDER BY datetime(start) ASC",
+      "LIMIT ? OFFSET ?",
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    const rows = this.db.prepare(sql).all(...params, limit, offset) as EventRow[];
+    return {
+      total: totalRow.total,
+      page,
+      limit,
+      events: rows.map(mapEventRow),
+    };
+  }
+
+  public getEventByRef(ref: string, theater?: string): EventRecord | null {
+    const sql = theater
+      ? `SELECT theater, ref, start, end, status, tickets_json, prices_json, venue_json, production_json, custom_json, created_at, updated_at
+         FROM events
+         WHERE ref = ? AND theater = ?
+         ORDER BY datetime(start) ASC
+         LIMIT 1`
+      : `SELECT theater, ref, start, end, status, tickets_json, prices_json, venue_json, production_json, custom_json, created_at, updated_at
+         FROM events
+         WHERE ref = ?
+         ORDER BY datetime(start) ASC
+         LIMIT 1`;
+
+    const row = (theater
+      ? this.db.prepare(sql).get(ref, theater)
+      : this.db.prepare(sql).get(ref)) as EventRow | undefined;
+
+    return row ? mapEventRow(row) : null;
+  }
+
+  public countEventsByRef(ref: string, theater?: string): number {
+    const sql = theater
+      ? "SELECT COUNT(*) AS total FROM events WHERE ref = ? AND theater = ?"
+      : "SELECT COUNT(*) AS total FROM events WHERE ref = ?";
+
+    const row = (theater
+      ? this.db.prepare(sql).get(ref, theater)
+      : this.db.prepare(sql).get(ref)) as { total: number };
+
+    return row.total;
   }
 
   public upsertLog(input: {
@@ -500,6 +534,25 @@ function parseJson<T>(value: string | null): T | undefined {
   }
 
   return JSON.parse(value) as T;
+}
+
+function mapEventRow(row: EventRow): EventRecord {
+  return {
+    theater: row.theater,
+    event: {
+      ref: row.ref,
+      start: row.start,
+      end: row.end ?? undefined,
+      status: row.status ?? undefined,
+      tickets: parseJson<JeeroEvent["tickets"]>(row.tickets_json),
+      prices: parseJson<JeeroEvent["prices"]>(row.prices_json),
+      venue: parseJson<JeeroEvent["venue"]>(row.venue_json),
+      production: JSON.parse(row.production_json),
+      custom: parseJson<JeeroEvent["custom"]>(row.custom_json) ?? {},
+    },
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 function asInteger(value: unknown): number | null {

@@ -1,4 +1,6 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 
 import type { JeeroConfig } from "./config.js";
 
@@ -20,6 +22,14 @@ export interface MotherInboxItem {
   event?: unknown;
   payload?: unknown;
   [key: string]: unknown;
+}
+
+export interface CachedImageResult {
+  filePath: string;
+  mimeType: string;
+  sizeBytes: number;
+  sourceUrl: string;
+  cached: boolean;
 }
 
 export class MotherClient {
@@ -106,6 +116,55 @@ export class MotherClient {
     await this.request("DELETE", `/v1/inbox?${query.toString()}`);
   }
 
+  public async cacheEventImage(imageUrl: string): Promise<CachedImageResult> {
+    const normalizedUrl = new URL(imageUrl).toString();
+    fs.mkdirSync(this.config.imageCacheDir, { recursive: true });
+
+    const cacheKey = crypto.createHash("sha256").update(normalizedUrl).digest("hex");
+    const existingPath = findExistingCachedImagePath(this.config.imageCacheDir, cacheKey);
+    if (existingPath) {
+      const stats = fs.statSync(existingPath);
+      return {
+        filePath: existingPath,
+        mimeType: inferMimeTypeFromPath(existingPath) ?? "application/octet-stream",
+        sizeBytes: stats.size,
+        sourceUrl: normalizedUrl,
+        cached: true,
+      };
+    }
+
+    const response = await fetch(normalizedUrl, { redirect: "follow" });
+    if (!response.ok) {
+      throw new Error(
+        `Event image request failed (${response.status} ${response.statusText}) for ${normalizedUrl}.`,
+      );
+    }
+
+    const mimeType = response.headers.get("content-type")?.split(";")[0].trim().toLowerCase() ?? "";
+    if (!mimeType.startsWith("image/")) {
+      throw new Error(`Event image URL did not return an image content type: ${mimeType || "unknown"}.`);
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    const maxBytes = 10 * 1024 * 1024;
+    if (buffer.byteLength > maxBytes) {
+      throw new Error(`Event image exceeds the 10 MB limit (${buffer.byteLength} bytes).`);
+    }
+
+    const extension = extensionForMimeType(mimeType);
+    const localPath = path.join(this.config.imageCacheDir, `${cacheKey}${extension}`);
+    fs.writeFileSync(localPath, buffer);
+
+    return {
+      filePath: localPath,
+      mimeType,
+      sizeBytes: buffer.byteLength,
+      sourceUrl: normalizedUrl,
+      cached: false,
+    };
+  }
+
   private async request(
     method: string,
     pathname: string,
@@ -142,6 +201,7 @@ export class MotherClient {
       url,
       status: response.status,
       statusText: response.statusText,
+      body: shouldLogResponseBody(pathname) ? responseBody : "[omitted]",
     });
 
     if (!response.ok) {
@@ -164,6 +224,10 @@ class MotherTraceLogger {
     });
     fs.appendFileSync(this.filePath, `${line}\n`, "utf8");
   }
+}
+
+function shouldLogResponseBody(pathname: string): boolean {
+  return !pathname.startsWith("/v1/inbox");
 }
 
 function withTimezone(
@@ -234,6 +298,51 @@ function extractInboxItems(raw: unknown): MotherInboxItem[] {
   }
 
   return [];
+}
+
+function extensionForMimeType(mimeType: string): string {
+  switch (mimeType) {
+    case "image/jpeg":
+      return ".jpg";
+    case "image/png":
+      return ".png";
+    case "image/webp":
+      return ".webp";
+    case "image/gif":
+      return ".gif";
+    case "image/svg+xml":
+      return ".svg";
+    case "image/avif":
+      return ".avif";
+    default:
+      return ".img";
+  }
+}
+
+function inferMimeTypeFromPath(filePath: string): string | null {
+  switch (path.extname(filePath).toLowerCase()) {
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".png":
+      return "image/png";
+    case ".webp":
+      return "image/webp";
+    case ".gif":
+      return "image/gif";
+    case ".svg":
+      return "image/svg+xml";
+    case ".avif":
+      return "image/avif";
+    default:
+      return null;
+  }
+}
+
+function findExistingCachedImagePath(cacheDir: string, cacheKey: string): string | null {
+  const entries = fs.readdirSync(cacheDir, { withFileTypes: true });
+  const match = entries.find((entry) => entry.isFile() && entry.name.startsWith(`${cacheKey}.`));
+  return match ? path.join(cacheDir, match.name) : null;
 }
 
 function normalizeInboxItem(value: Record<string, unknown>): MotherInboxItem {

@@ -205,11 +205,11 @@ export class JeeroDatabase {
     } else {
       if (filter.from) {
         where.push("datetime(start) >= datetime(?)");
-        params.push(filter.from);
+        params.push(normalizeRangeBoundary(filter.from, "start"));
       }
       if (filter.to) {
         where.push("datetime(start) <= datetime(?)");
-        params.push(filter.to);
+        params.push(normalizeRangeBoundary(filter.to, "end"));
       }
     }
 
@@ -561,4 +561,12 @@ function asInteger(value: unknown): number | null {
   }
 
   return null;
+}
+
+function normalizeRangeBoundary(value: string, boundary: "start" | "end"): string {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return boundary === "start" ? `${value} 00:00:00` : `${value} 23:59:59`;
+  }
+
+  return value;
 }

@@ -22,6 +22,11 @@ export interface MotherInboxItem {
   [key: string]: unknown;
 }
 
+export interface MotherInboxRequest {
+  subscriptionId: string;
+  settings: Record<string, unknown>;
+}
+
 export class MotherClient {
   private readonly traceLogger: MotherTraceLogger | null;
 
@@ -78,21 +83,47 @@ export class MotherClient {
     subscriptionId: string,
     settings: Record<string, unknown>,
   ): Promise<MotherInboxItem[]> {
+    const results = await this.getInboxBatch([
+      {
+        subscriptionId,
+        settings,
+      },
+    ]);
+    return results.get(subscriptionId) ?? [];
+  }
+
+  public async getInboxBatch(
+    requests: MotherInboxRequest[],
+  ): Promise<Map<string, MotherInboxItem[]>> {
+    if (requests.length === 0) {
+      return new Map();
+    }
+
     const headers: Record<string, string> = {};
     if (this.config.noOfItemsPerPickup) {
       headers["no_of_items_per_pickup"] = String(this.config.noOfItemsPerPickup);
     }
 
+    const payload = Object.fromEntries(
+      requests.map((request) => [
+        request.subscriptionId,
+        withTimezone(request.settings, this.config.defaultTimezone),
+      ]),
+    );
+
     const response = await this.request(
       "POST",
       "/v1/inbox/big",
-      {
-        [subscriptionId]: withTimezone(settings, this.config.defaultTimezone),
-      },
+      payload,
       headers,
     );
     const raw = await response.json();
-    return extractInboxItems(raw);
+    const itemsBySubscription = extractInboxItemsBySubscription(
+      raw,
+      requests.map((request) => request.subscriptionId),
+    );
+    this.traceLogger?.logInboxLogItems(itemsBySubscription);
+    return itemsBySubscription;
   }
 
   public async removeInboxItems(itemIds: string[]): Promise<void> {
@@ -121,13 +152,15 @@ export class MotherClient {
     };
     const requestBody = body === undefined ? undefined : JSON.stringify(body);
 
-    this.traceLogger?.log({
-      phase: "request",
-      method,
-      url,
-      headers,
-      body: requestBody,
-    });
+    if (shouldTraceRequest(method, pathname)) {
+      this.traceLogger?.log({
+        phase: "request",
+        method,
+        url,
+        hasBody: body !== undefined,
+        headerKeys: Object.keys(headers).sort(),
+      });
+    }
 
     const response = await fetch(url, {
       method,
@@ -136,14 +169,17 @@ export class MotherClient {
     });
 
     const responseBody = await response.clone().text();
-    this.traceLogger?.log({
-      phase: "response",
-      method,
-      url,
-      status: response.status,
-      statusText: response.statusText,
-      body: shouldLogResponseBody(pathname) ? responseBody : "[omitted]",
-    });
+    if (shouldTraceRequest(method, pathname)) {
+      this.traceLogger?.log({
+        phase: "response",
+        method,
+        url,
+        status: response.status,
+        statusText: response.statusText,
+        bodyOmitted: !shouldLogResponseBody(pathname),
+        responseSize: responseBody.length,
+      });
+    }
 
     if (!response.ok) {
       throw new Error(
@@ -165,10 +201,34 @@ class MotherTraceLogger {
     });
     fs.appendFileSync(this.filePath, `${line}\n`, "utf8");
   }
+
+  public logInboxLogItems(itemsBySubscription: Map<string, MotherInboxItem[]>): void {
+    for (const [subscriptionId, items] of itemsBySubscription.entries()) {
+      for (const item of items) {
+        if (!(item.item === "log" || item.action === "log")) {
+          continue;
+        }
+
+        const message = extractInboxLogMessage(item);
+        if (!message) {
+          continue;
+        }
+
+        this.log({
+          phase: "inbox_log_item",
+          message,
+        });
+      }
+    }
+  }
 }
 
 function shouldLogResponseBody(pathname: string): boolean {
   return !pathname.startsWith("/v1/inbox");
+}
+
+function shouldTraceRequest(method: string, pathname: string): boolean {
+  return !(method === "DELETE" && pathname.startsWith("/v1/inbox"));
 }
 
 function withTimezone(
@@ -239,6 +299,69 @@ function extractInboxItems(raw: unknown): MotherInboxItem[] {
   }
 
   return [];
+}
+
+function extractInboxItemsBySubscription(
+  raw: unknown,
+  subscriptionIds: string[],
+): Map<string, MotherInboxItem[]> {
+  const empty = new Map<string, MotherInboxItem[]>();
+  for (const subscriptionId of subscriptionIds) {
+    empty.set(subscriptionId, []);
+  }
+
+  if (Array.isArray(raw) || !isObject(raw)) {
+    const items = extractInboxItems(raw);
+    if (subscriptionIds.length === 1) {
+      empty.set(subscriptionIds[0], items);
+      return empty;
+    }
+
+    for (const item of items) {
+      const subscriptionId = item.subscription_id;
+      if (!subscriptionId || !empty.has(subscriptionId)) {
+        continue;
+      }
+      empty.get(subscriptionId)?.push(item);
+    }
+    return empty;
+  }
+
+  for (const subscriptionId of subscriptionIds) {
+    const scopedRaw = raw[subscriptionId];
+    if (scopedRaw === undefined) {
+      continue;
+    }
+
+    empty.set(subscriptionId, extractInboxItems(scopedRaw));
+  }
+
+  return empty;
+}
+
+function extractInboxLogMessage(item: MotherInboxItem): string | null {
+  if (item.data && typeof item.data === "object") {
+    const message = (item.data as Record<string, unknown>).message;
+    if (typeof message === "string" && message.length > 0) {
+      return message;
+    }
+  }
+
+  if (item.payload && typeof item.payload === "object") {
+    const message = (item.payload as Record<string, unknown>).message;
+    if (typeof message === "string" && message.length > 0) {
+      return message;
+    }
+  }
+
+  if (item.raw && typeof item.raw === "object") {
+    const message = (item.raw as Record<string, unknown>).message;
+    if (typeof message === "string" && message.length > 0) {
+      return message;
+    }
+  }
+
+  return null;
 }
 
 function normalizeInboxItem(value: Record<string, unknown>): MotherInboxItem {

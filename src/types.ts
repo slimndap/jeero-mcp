@@ -36,24 +36,32 @@ export interface JeeroEvent {
 
 export interface StoredSubscription {
   id: number;
+  subscriptionKey: string;
+  label: string;
+  theater: string;
   motherSubscriptionId: string;
   settings: Record<string, unknown>;
-  siteKey: string;
-  siteIdentifier: string;
+  isDefault: boolean;
+  isActive: boolean;
   createdAt: string;
   updatedAt: string;
 }
 
 export interface SubscriptionEnvelope extends Record<string, unknown> {
+  subscriptionKey: string;
+  label: string;
+  theater: string;
   motherSubscriptionId: string;
   settings: Record<string, unknown>;
+  isDefault: boolean;
+  isActive: boolean;
   metadata: Record<string, unknown>;
   fields: unknown[];
   status: Record<string, unknown>;
 }
 
 export interface EventRecord {
-  theater: string;
+  subscriptionKey: string;
   event: JeeroEvent;
   createdAt: string;
   updatedAt: string;
@@ -61,8 +69,8 @@ export interface EventRecord {
 
 export interface LogRecord {
   inboxId: string;
+  subscriptionKey: string;
   subscriptionId: string;
-  theater: string;
   action: string;
   message: string;
   createdAt: string;
@@ -70,8 +78,8 @@ export interface LogRecord {
 }
 
 export interface TicketSnapshotRecord {
+  subscriptionKey: string;
   snapshotDate: string;
-  theater: string;
   ref: string;
   start?: string;
   productionTitle: string;
@@ -83,11 +91,13 @@ export interface TicketSnapshotRecord {
 }
 
 export interface EventsFilter {
+  subscription?: string;
   from?: string;
   to?: string;
   date?: string;
   status?: string;
   theater?: string;
+  category?: string;
   query?: string;
   page?: number;
   limit?: number;
@@ -101,10 +111,10 @@ export interface PaginatedEventsResult {
 }
 
 export interface TicketSnapshotsFilter {
+  subscription?: string;
   date?: string;
   from?: string;
   to?: string;
-  theater?: string;
   ref?: string;
   query?: string;
   limit?: number;

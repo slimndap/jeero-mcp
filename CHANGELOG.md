@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.1
+
+- Release through GitHub Actions with npm provenance and MCP Registry publication.
+- Normalize the npm executable path in package metadata.
+
 ## 1.0.0
 
 - Published Jeero MCP as a local stdio MCP package.

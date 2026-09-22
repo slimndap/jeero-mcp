@@ -1,10 +1,10 @@
 {
   "name": "jeero-mcp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Local Jeero MCP server backed by Mother and SQLite.",
   "type": "module",
   "bin": {
-    "jeero-mcp": "./dist/index.js"
+    "jeero-mcp": "dist/index.js"
   },
   "files": [
     "dist"

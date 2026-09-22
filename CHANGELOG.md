@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.2
+
+- Use Node 24 in the trusted publishing workflow.
+
 ## 1.0.1
 
 - Release through GitHub Actions with npm provenance and MCP Registry publication.

@@ -10,7 +10,6 @@ permissions:
 
 jobs:
   publish:
-    if: vars.MOTHER_AUTHORIZATION_VERIFIED == 'true'
     runs-on: ubuntu-latest
     environment: release
     steps:

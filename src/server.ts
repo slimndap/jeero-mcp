@@ -1,5 +1,4 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { McpServer } from "@modelcontextprotocol/server";
 import fs from "node:fs";
 import { z } from "zod";
 
@@ -27,7 +26,7 @@ const createSubscriptionSchema = z.object({
   subscription_key: z.string().min(1),
   label: z.string().min(1),
   theater: z.string().min(1),
-  settings: z.record(z.unknown()).optional(),
+  settings: z.record(z.string(), z.json()).optional(),
   is_default: z.boolean().optional(),
 });
 
@@ -38,7 +37,7 @@ const getSubscriptionsSchema = z.object({
 
 const configSubscriptionSchema = z.object({
   subscription: z.string().min(1).optional(),
-  settings: z.record(z.unknown()),
+  settings: z.record(z.string(), z.json()),
 });
 
 const eventsFilterSchema = z.object({
@@ -93,7 +92,7 @@ const syncSubscriptionsSchema = z.object({
   force: z.boolean().optional(),
 });
 
-export async function startServer(config: JeeroConfig): Promise<void> {
+export function createServer(config: JeeroConfig): McpServer {
   const db = new JeeroDatabase(config.databasePath);
   const identity = loadOrCreateSiteIdentity(config);
   const mother = new MotherClient(config, identity.siteKey, identity.siteIdentifier);
@@ -105,8 +104,8 @@ export async function startServer(config: JeeroConfig): Promise<void> {
   const backgroundSync = app.startBackgroundSync();
 
   const server = new McpServer({
-    name: "jeero-agent-plugin",
-    version: "0.1.0",
+    name: "jeero-mcp",
+    version: "1.0.0",
   });
 
   server.registerTool(
@@ -301,7 +300,6 @@ export async function startServer(config: JeeroConfig): Promise<void> {
     },
   );
 
-  const transport = new StdioServerTransport();
   let isClosed = false;
   const closeDb = () => {
     if (isClosed) {
@@ -317,11 +315,10 @@ export async function startServer(config: JeeroConfig): Promise<void> {
     process.exit(0);
   };
 
-  process.once("SIGINT", closeDb);
-  process.once("SIGTERM", closeDb);
-  process.stdin.once("end", shutdown);
-  process.stdin.once("close", shutdown);
-  await server.connect(transport);
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+
+  return server;
 }
 
 function toolResult<T extends Record<string, unknown>>(payload: T): {

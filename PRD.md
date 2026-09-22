@@ -30,7 +30,7 @@ This product is intentionally narrow. It avoids the WordPress admin UI, WordPres
 
 - local MCP server in Node.js and TypeScript
 - npm distribution with `npx` launch
-- exactly one Jeero subscription per MCP client machine
+- multiple local Jeero subscriptions per MCP client machine, with one optional default
 - local SQLite database
 - local storage of:
   - subscription metadata
@@ -53,10 +53,9 @@ This product is intentionally narrow. It avoids the WordPress admin UI, WordPres
 - replacing AWS Lambda, SNS, or DynamoDB
 - storing raw inbox payloads locally
 - storing inbox items locally
-- supporting multiple subscriptions per machine
 - WordPress post creation
 - WordPress admin screens
-- background daemon scheduling
+- hosted or remote MCP transports
 - non-event content types
 
 ## Users
@@ -93,14 +92,14 @@ The product should be optimized for tool use by agents, not for manual UI admini
 
 ## Subscription Model
 
-- The MCP maintains exactly one local subscription per machine.
-- If no local subscription exists yet, `get_subscription` creates one through Mother and persists the returned subscription ID locally.
-- Subscription settings are stored locally and also sent to Mother when needed.
+- The MCP maintains multiple local subscriptions per machine and can mark one as the default.
+- `create_subscription` creates a subscription through Mother and persists the returned subscription ID locally.
+- Subscription settings are stored locally and sent to Mother when needed.
 - Mother remains responsible for returning the active field definitions and subscription metadata.
 
 ## Sync Model
 
-- `get_events` is the only public sync trigger in v1.
+- `get_events`, `sync_subscription`, and `sync_subscriptions` are public sync triggers in v1.
 - On each `get_events` call, the MCP checks the last inbox synchronization timestamp.
 - If the last check was less than 60 seconds ago, the MCP skips refresh and returns local DB results.
 - If the last check was 60 seconds ago or more, the MCP:
@@ -111,7 +110,7 @@ The product should be optimized for tool use by agents, not for manual UI admini
   - updates local sync state
   - returns the resulting filtered event set
 
-This is a lazy sync model, not a continuous scheduler.
+This is a lazy sync model with a one-minute background refresh while the local MCP process is running; it is not a hosted daemon.
 
 ## Public Tools
 
@@ -119,14 +118,11 @@ This is a lazy sync model, not a continuous scheduler.
 
 ### Purpose
 
-Return the single local subscription for this machine. If it does not exist yet, create it first.
+Return a local Jeero subscription by key, or the default subscription when no key is provided.
 
 ### Behavior
 
-- Load local subscription record.
-- If missing:
-  - call Mother `subscribe`
-  - persist local subscription ID
+- Load the selected local subscription record.
 - call Mother `get subscription` using current local settings
 - return:
   - subscription metadata
@@ -275,7 +271,7 @@ This matches [jeero-subscription-update.py](/Users/jeroen/Dev/jeero-mother/funct
 - JSON body:
   - local settings object keyed by subscription or equivalent subscription settings payload
 
-For this MCP, with one subscription per machine, the payload can be shaped specifically for the one local subscription as long as it remains compatible with Mother expectations.
+For this MCP, the payload contains settings for each selected local subscription and remains compatible with Mother expectations.
 
 #### `DELETE /v1/inbox`
 
@@ -316,11 +312,9 @@ The MCP should do the same:
 - store locally
 - reuse for all Mother requests
 
-### Validation Reality
+### Site identity
 
-The current Mother validator in [security.py](/Users/jeroen/Dev/jeero-mother/functions/jeero/security.py#L1) returns `True` unconditionally, so current authorization effectively checks only for the presence of `site_key` and `site_url`.
-
-Even so, the MCP should still treat both values as stable persistent identity values, because they are used in subscription creation, inbox lookup, and site-level grouping.
+The MCP treats both values as stable persistent identity values because they are used in subscription creation, inbox lookup, and site-level grouping.
 
 ## Data Model
 
@@ -373,7 +367,7 @@ The local data model should follow the **actual Mother event structure**, not a 
 
 #### `subscription`
 
-Exactly one row.
+One row per local subscription.
 
 Suggested fields:
 
@@ -444,7 +438,7 @@ Expected keys:
 
 The MCP is machine-scoped, not workspace-scoped.
 
-There is only one subscription per MCP client machine.
+Multiple subscriptions can be stored per MCP client machine. A default subscription is used when a tool omits the subscription key.
 
 Any local identity values required for Mother should be generated and persisted once, then reused. The equivalent of the plugin's `site_key` behavior should exist locally.
 
@@ -471,8 +465,8 @@ Target UX for users:
 The product is successful when:
 
 - a Claude user can add the server with an `npx` command
-- the server can initialize a Jeero subscription on first use
-- the user can configure the subscription via MCP tools
+- the user can initialize a Jeero subscription with `create_subscription`
+- the user can create, configure, select, and synchronize subscriptions via MCP tools
 - `get_events` returns up-to-date locally stored events
 - event data matches the Mother structure closely enough that existing Jeero assumptions still hold
 
@@ -486,9 +480,9 @@ The MCP depends on current Mother endpoint behavior and payload shape.
 
 If Mother strongly assumes WordPress-specific site identity behavior, the MCP will need a compatible local replacement.
 
-### 3. Lazy sync only
+### 3. Local sync only
 
-Because sync only happens during `get_events`, event freshness depends on user or agent reads.
+Sync occurs during relevant tool calls and every minute while the local MCP process runs. It does not run when the process is stopped.
 
 ## Open Questions
 

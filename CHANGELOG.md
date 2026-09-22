@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.3
+
+- Retry MCP Registry publication while a new npm release propagates.
+
 ## 1.0.2
 
 - Use Node 24 in the trusted publishing workflow.

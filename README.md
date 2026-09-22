@@ -21,7 +21,7 @@ The server communicates over stdio. Do not write application logs to stdout.
 
 ## First use
 
-Create a subscription with `create_subscription`, then use `config_subscription` to send its Jeero settings to Mother. One subscription can be the default; tools use it when `subscription` is omitted. Multiple active subscriptions are supported.
+Create a subscription with `create_subscription`. Mother first returns its **Ticketing solution** field; set that value with `config_subscription`, which returns the connector-specific fields. Send those completed settings through `config_subscription`. One subscription can be the default; tools use it when `subscription` is omitted. Multiple active subscriptions are supported.
 
 `get_events` synchronizes the selected subscriptions at most once a minute. While the server is running, active subscriptions are also checked every minute. Use `sync_subscription` or `sync_subscriptions` with `force: true` when an immediate refresh is needed.
 

@@ -94,6 +94,7 @@ The product should be optimized for tool use by agents, not for manual UI admini
 
 - The MCP maintains multiple local subscriptions per machine and can mark one as the default.
 - `create_subscription` creates a subscription through Mother and persists the returned subscription ID locally.
+- Mother’s initial field set contains the ticketing solution selector (`settings.theater`). After it is set, Mother returns the connector-specific fields.
 - Subscription settings are stored locally and sent to Mother when needed.
 - Mother remains responsible for returning the active field definitions and subscription metadata.
 

@@ -25,7 +25,6 @@ const subscriptionSelectorSchema = z.object({
 const createSubscriptionSchema = z.object({
   subscription_key: z.string().min(1),
   label: z.string().min(1),
-  theater: z.string().min(1),
   settings: z.record(z.string(), z.json()).optional(),
   is_default: z.boolean().optional(),
 });
@@ -129,7 +128,7 @@ export function createServer(config: JeeroConfig): McpServer {
     "create_subscription",
     {
       description:
-        "Create a new local Jeero subscription, initialize it via Mother, and persist its settings.",
+        "Create a new local Jeero subscription and return Mother’s configuration fields. Set settings.theater with config_subscription; its response contains the connector-specific fields.",
       inputSchema: createSubscriptionSchema.shape,
     },
     async (input) => {
@@ -138,7 +137,6 @@ export function createServer(config: JeeroConfig): McpServer {
         await app.createSubscription({
           subscriptionKey: parsed.subscription_key,
           label: parsed.label,
-          theater: parsed.theater,
           settings: parsed.settings ?? {},
           isDefault: parsed.is_default,
         }),
@@ -401,7 +399,6 @@ class JeeroService {
   public async createSubscription(input: {
     subscriptionKey: string;
     label: string;
-    theater: string;
     settings: Record<string, unknown>;
     isDefault?: boolean;
   }): Promise<SubscriptionEnvelope> {
@@ -409,7 +406,7 @@ class JeeroService {
     const subscription = this.db.createSubscription({
       subscriptionKey: input.subscriptionKey,
       label: input.label,
-      theater: input.theater,
+      theater: selectedTheater(input.settings),
       motherSubscriptionId: created.subscriptionId,
       settings: input.settings,
       isDefault: input.isDefault,
@@ -451,6 +448,7 @@ class JeeroService {
     const persisted = this.db.updateSubscription({
       subscriptionKey: current.subscriptionKey,
       settings: mergedSettings,
+      theater: selectedTheater(mergedSettings) || current.theater,
     });
 
     await this.mother.updateSubscription(persisted.motherSubscriptionId, persisted.settings);
@@ -988,6 +986,10 @@ function toSubscriptionEnvelope(
 
 function emptyToNull(value: string | null): string | null {
   return value && value.length > 0 ? value : null;
+}
+
+function selectedTheater(settings: Record<string, unknown>): string {
+  return typeof settings.theater === "string" ? settings.theater : "";
 }
 
 class ActivityTraceLogger {

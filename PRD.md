@@ -125,11 +125,9 @@ Return a local Jeero subscription by key, or the default subscription when no ke
 
 - Load the selected local subscription record.
 - call Mother `get subscription` using current local settings
-- return:
-  - subscription metadata
-  - current settings
-  - field definitions
-  - status data such as `inactive`, `interval`, `next_delivery`, `limit`, `theater`
+- return a credential-free summary with subscription identity, active/default flags,
+  configured field names, required-field completeness, and the number of connection errors
+- keep raw settings, field definitions and Mother metadata inside the server and private browser screen
 
 ### Notes
 
@@ -139,18 +137,18 @@ This is the MCP equivalent of the WordPress plugin's "load subscription from DB,
 
 ### Purpose
 
-Update the local subscription settings based on user or agent input, using the field definitions provided by Mother.
+Let the user configure the subscription outside chat, using the field definitions provided by Mother.
 
 ### Behavior
 
-- Accept settings payload.
-- Persist settings locally.
-- call Mother `update subscription`
-- call Mother `get subscription` to retrieve fresh state and fields
-- return:
-  - updated settings
-  - refreshed field definitions
-  - status data
+- Optionally accept `settings.theater`; accept all other settings only through the browser.
+- Start an expiring loopback configuration session with a separate access code.
+- Use URL elicitation when the client declares support (legacy and multi-round-trip MCP).
+- Otherwise return a manually openable link and code; `manual: true` forces this route.
+- Render fresh Mother fields in the browser, preserve saved keys when left empty, and validate choices.
+- Call Mother `update subscription` before persisting the new local settings.
+- Return only link/session information to the agent; it must not inspect the private screen.
+- Redact credentials from tool responses, errors and new debug logs.
 
 ### Notes
 

@@ -6,16 +6,15 @@ import { createServer } from "./server.js";
 function main(): void {
   const config = loadConfig();
   serveStdio(() => createServer(config), {
-    onerror: (error) => {
-      process.stderr.write(`${error.stack ?? error.message}\n`);
+    onerror: () => {
+      process.stderr.write("Jeero MCP connection error. Check the client configuration and try again.\n");
     },
   });
 }
 
 try {
   main();
-} catch (error: unknown) {
-  const message = error instanceof Error ? error.stack ?? error.message : String(error);
-  process.stderr.write(`${message}\n`);
+} catch {
+  process.stderr.write("Jeero could not start. Check the local data directory and configuration.\n");
   process.exit(1);
 }

@@ -1,0 +1,189 @@
+{
+  "date": "2026-10-23",
+  "upstream": "loopback fixture; no real credentials or providers",
+  "connections": [
+    {
+      "connection": "connection-7u5IIh",
+      "calls": [
+        "config_subscription",
+        "config_subscription",
+        "get_subscription",
+        "sync_subscription",
+        "get_logs",
+        "get_subscription"
+      ],
+      "input_responses": [
+        {
+          "configure": {
+            "action": "decline"
+          }
+        }
+      ],
+      "client": {
+        "name": "claude-code",
+        "title": "Claude Code",
+        "version": "2.1.299",
+        "description": "Anthropic's agentic coding tool",
+        "websiteUrl": "https://claude.com/claude-code"
+      },
+      "capabilities": {
+        "roots": {
+          "listChanged": true
+        },
+        "elicitation": {
+          "form": {},
+          "url": {}
+        },
+        "extensions": {
+          "io.modelcontextprotocol/ui": {
+            "mimeTypes": [
+              "text/html;profile=mcp-app"
+            ]
+          }
+        }
+      },
+      "outgoing_dummy_key_leak": false,
+      "trace_dummy_key_leak": false,
+      "saved_correct_dummy_key": true
+    },
+    {
+      "connection": "connection-9lFmj7",
+      "calls": [
+        "config_subscription",
+        "config_subscription",
+        "get_subscription",
+        "sync_subscription",
+        "get_logs"
+      ],
+      "input_responses": [
+        {
+          "configure": {
+            "action": "decline"
+          }
+        }
+      ],
+      "client": {
+        "name": "claude-code",
+        "title": "Claude Code",
+        "version": "2.1.308",
+        "description": "Anthropic's agentic coding tool",
+        "websiteUrl": "https://claude.com/claude-code"
+      },
+      "capabilities": {
+        "roots": {
+          "listChanged": true
+        },
+        "elicitation": {
+          "form": {},
+          "url": {}
+        },
+        "extensions": {
+          "io.modelcontextprotocol/ui": {
+            "mimeTypes": [
+              "text/html;profile=mcp-app"
+            ]
+          }
+        }
+      },
+      "outgoing_dummy_key_leak": false,
+      "trace_dummy_key_leak": false,
+      "saved_correct_dummy_key": true
+    },
+    {
+      "connection": "connection-HQW7Q2",
+      "calls": [],
+      "input_responses": [],
+      "client": {
+        "name": "codex-mcp-client",
+        "title": "Codex",
+        "version": "0.163.0-alpha.11.2"
+      },
+      "capabilities": {
+        "experimental": {
+          "codex/auth-change": {}
+        },
+        "elicitation": {
+          "form": {},
+          "url": {}
+        }
+      },
+      "outgoing_dummy_key_leak": false,
+      "trace_dummy_key_leak": false
+    },
+    {
+      "connection": "connection-JmKksQ",
+      "calls": [
+        "config_subscription",
+        "get_subscription",
+        "sync_subscription",
+        "get_logs",
+        "get_subscription"
+      ],
+      "input_responses": [],
+      "client": {
+        "name": "local-agent-mode-jeero_desktop_test",
+        "version": "1.0.0"
+      },
+      "capabilities": {
+        "roots": {
+          "listChanged": true
+        },
+        "extensions": {
+          "io.modelcontextprotocol/ui": {
+            "mimeTypes": [
+              "text/html;profile=mcp-app"
+            ]
+          }
+        }
+      },
+      "outgoing_dummy_key_leak": false,
+      "trace_dummy_key_leak": false,
+      "saved_correct_dummy_key": true
+    },
+    {
+      "connection": "connection-L9wo6B",
+      "calls": [],
+      "input_responses": [],
+      "client": {
+        "name": "codex-mcp-client",
+        "title": "Codex",
+        "version": "0.163.0-alpha.11.2"
+      },
+      "capabilities": {
+        "experimental": {
+          "codex/auth-change": {}
+        },
+        "elicitation": {
+          "form": {},
+          "url": {}
+        }
+      },
+      "outgoing_dummy_key_leak": false,
+      "trace_dummy_key_leak": false
+    },
+    {
+      "connection": "connection-t5YhQF",
+      "calls": [],
+      "input_responses": [],
+      "client": {
+        "name": "claude-ai",
+        "version": "0.1.0"
+      },
+      "capabilities": {},
+      "outgoing_dummy_key_leak": false,
+      "trace_dummy_key_leak": false
+    }
+  ],
+  "user_assisted_codex": {
+    "server": "jeero_test",
+    "subscription": "desktop-flow",
+    "route": "manual link; user opened and filled browser page",
+    "agent_browser_tools_used": false,
+    "configuration_complete": true,
+    "connection_errors": 0,
+    "sync_ok": true,
+    "log_message": "Fixture upstream echoed [REDACTED]",
+    "native_url_dialog_verified": false,
+    "real_provider_tested": false
+  }
+}

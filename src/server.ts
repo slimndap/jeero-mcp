@@ -1,8 +1,11 @@
-import { McpServer } from "@modelcontextprotocol/server";
+import { McpServer, inputRequired, CLIENT_CAPABILITIES_META_KEY, PROTOCOL_VERSION_META_KEY, type CallToolResult, type ClientCapabilities, type InputRequiredResult, type ServerContext } from "@modelcontextprotocol/server";
 import fs from "node:fs";
+import crypto from "node:crypto";
 import { z } from "zod";
 
 import { JeeroDatabase } from "./db.js";
+import { ConfigurationScreen } from "./configuration.js";
+import { SecretRedactor } from "./secrets.js";
 import type { JeeroConfig } from "./config.js";
 import { loadOrCreateSiteIdentity } from "./config.js";
 import {
@@ -25,7 +28,7 @@ const subscriptionSelectorSchema = z.object({
 const createSubscriptionSchema = z.object({
   subscription_key: z.string().min(1),
   label: z.string().min(1),
-  settings: z.record(z.string(), z.json()).optional(),
+  settings: z.object({ theater: z.string().min(1).optional() }).strict().optional(),
   is_default: z.boolean().optional(),
 });
 
@@ -36,7 +39,8 @@ const getSubscriptionsSchema = z.object({
 
 const configSubscriptionSchema = z.object({
   subscription: z.string().min(1).optional(),
-  settings: z.record(z.string(), z.json()),
+  settings: z.object({ theater: z.string().min(1).optional() }).strict().optional(),
+  manual: z.boolean().optional(),
 });
 
 const eventsFilterSchema = z.object({
@@ -94,12 +98,16 @@ const syncSubscriptionsSchema = z.object({
 export function createServer(config: JeeroConfig): McpServer {
   const db = new JeeroDatabase(config.databasePath);
   const identity = loadOrCreateSiteIdentity(config);
-  const mother = new MotherClient(config, identity.siteKey, identity.siteIdentifier);
+  const secrets = new SecretRedactor();
+  secrets.remember(identity.siteKey);
+  for (const subscription of db.listSubscriptions()) secrets.remember(subscription.settings);
+  const mother = new MotherClient(config, identity.siteKey, identity.siteIdentifier, secrets);
 
   const activityLogger = config.motherTraceEnabled
     ? new ActivityTraceLogger(config.motherTracePath)
     : null;
-  const app = new JeeroService(db, mother, activityLogger);
+  const app = new JeeroService(db, mother, activityLogger, secrets);
+  const screen = new ConfigurationScreen(app);
   const backgroundSync = app.startBackgroundSync();
 
   const server = new McpServer({
@@ -107,7 +115,22 @@ export function createServer(config: JeeroConfig): McpServer {
     version: "1.0.0",
   });
 
-  server.registerTool(
+  function registerTool<S extends z.ZodRawShape>(
+    name: string,
+    definition: { description: string; inputSchema: S },
+    handler: (input: z.infer<z.ZodObject<S>>, ctx: ServerContext) => Promise<CallToolResult | InputRequiredResult>,
+  ): void {
+    server.registerTool(name, { ...definition, inputSchema: z.object(definition.inputSchema) }, async (input, ctx) => {
+      try {
+        return secrets.clean(await handler(input, ctx));
+      } catch {
+        // Upstream errors and validation libraries can echo submitted credentials.
+        return { isError: true, content: [{ type: "text", text: "Jeero could not complete this request. Check the subscription and try again; use config_subscription to configure it outside chat." }] };
+      }
+    });
+  }
+
+  registerTool(
     "list_subscriptions",
     {
       description: "Return all locally configured Jeero subscriptions, optionally filtered by theater.",
@@ -124,27 +147,27 @@ export function createServer(config: JeeroConfig): McpServer {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "create_subscription",
     {
       description:
-        "Create a new local Jeero subscription and return Mother’s configuration fields. Set settings.theater with config_subscription; its response contains the connector-specific fields.",
+        "Create a local Jeero subscription. Only settings.theater may be supplied in chat. Next call config_subscription to open its private configuration screen. Never ask for API keys or passwords in chat.",
       inputSchema: createSubscriptionSchema.shape,
     },
     async (input) => {
       const parsed = createSubscriptionSchema.parse(input);
       return toolResult(
-        await app.createSubscription({
+        publicSubscription(await app.createSubscription({
           subscriptionKey: parsed.subscription_key,
           label: parsed.label,
           settings: parsed.settings ?? {},
           isDefault: parsed.is_default,
-        }),
+        })),
       );
     },
   );
 
-  server.registerTool(
+  registerTool(
     "get_subscription",
     {
       description:
@@ -153,23 +176,54 @@ export function createServer(config: JeeroConfig): McpServer {
     },
     async (input) => {
       const parsed = subscriptionSelectorSchema.parse(input);
-      return toolResult(await app.getSubscriptionEnvelope(parsed.subscription));
+      return toolResult(publicSubscription(await app.getSubscriptionEnvelope(parsed.subscription)));
     },
   );
 
-  server.registerTool(
+  registerTool(
     "config_subscription",
     {
-      description: "Update local Jeero subscription settings and synchronize them to Mother.",
+      description: "Open a private browser configuration screen. Returns a temporary URL and access code; uses URL elicitation when supported. Set manual=true to get a link without elicitation. The user must open it themselves; never inspect the page or ask for keys in chat. Optional settings.theater selects the ticketing solution. Check get_subscription afterwards.",
       inputSchema: configSubscriptionSchema.shape,
     },
-    async (input) => {
+    async (input, ctx) => {
       const parsed = configSubscriptionSchema.parse(input);
-      return toolResult(await app.updateSubscription(parsed.subscription, parsed.settings));
+      const key = app.resolveSubscription(parsed.subscription).subscriptionKey;
+      const rawState = ctx.mcpReq.requestState();
+      const state = typeof rawState === "string" ? JSON.parse(rawState) : undefined;
+      let link = screen.resume(key, state?.configurationUrl);
+      if (!link) {
+        if (parsed.settings) await app.updateSubscription(key, parsed.settings);
+        link = await screen.open(key);
+      }
+      const saved = screen.isSaved(link.url);
+      // SDK 2.0 validates this envelope at runtime but publishes an empty envelope type.
+      const envelope = ctx.mcpReq.envelope as {
+        [CLIENT_CAPABILITIES_META_KEY]?: ClientCapabilities;
+        [PROTOCOL_VERSION_META_KEY]?: string;
+      } | undefined;
+      const capabilities = envelope?.[CLIENT_CAPABILITIES_META_KEY] ?? server.server.getClientCapabilities();
+      if (!parsed.manual && capabilities?.elicitation?.url && !saved && !ctx.mcpReq.inputResponses?.configure) {
+        const message = `Open the private Jeero configuration screen and enter access code ${link.access_code}. Enter keys only there. Do not let the agent inspect this page.`;
+        const revision = envelope?.[PROTOCOL_VERSION_META_KEY] ?? server.server.getNegotiatedProtocolVersion();
+        if ((revision ?? "") >= "2026-07-28") {
+          return inputRequired({
+            inputRequests: { configure: inputRequired.elicitUrl({ message, url: link.url }) },
+            requestState: JSON.stringify({ configurationUrl: link.url }),
+          });
+        }
+        try {
+          await ctx.mcpReq.elicitInput({ mode: "url", message, url: link.url, elicitationId: crypto.randomUUID() }, { timeout: 15_000 });
+        } catch {
+          // Some clients advertise URL support but cannot render it; retain the manual route.
+        }
+      }
+      return toolResult({ ...link, saved: screen.isSaved(link.url),
+        instructions: "Open this link yourself and enter the access code. Enter keys only on that page. Do not let your agent inspect it. After saving, ask Jeero to check get_subscription. The page runs on the same computer as the Jeero MCP server." });
     },
   );
 
-  server.registerTool(
+  registerTool(
     "set_default_subscription",
     {
       description: "Set the default local Jeero subscription used by tools when no key is provided.",
@@ -181,7 +235,7 @@ export function createServer(config: JeeroConfig): McpServer {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "activate_subscription",
     {
       description: "Activate a local Jeero subscription so it participates in sync again.",
@@ -193,7 +247,7 @@ export function createServer(config: JeeroConfig): McpServer {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "deactivate_subscription",
     {
       description: "Deactivate a local Jeero subscription without deleting its stored data.",
@@ -205,7 +259,7 @@ export function createServer(config: JeeroConfig): McpServer {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "sync_subscription",
     {
       description: "Synchronize one local Jeero subscription from Mother.",
@@ -217,7 +271,7 @@ export function createServer(config: JeeroConfig): McpServer {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "sync_subscriptions",
     {
       description: "Synchronize all active local Jeero subscriptions, optionally filtered by theater.",
@@ -234,7 +288,7 @@ export function createServer(config: JeeroConfig): McpServer {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "get_events",
     {
       description:
@@ -247,7 +301,7 @@ export function createServer(config: JeeroConfig): McpServer {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "get_event",
     {
       description:
@@ -260,7 +314,7 @@ export function createServer(config: JeeroConfig): McpServer {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "get_logs",
     {
       description: "Return recently imported Jeero inbox log messages, optionally filtered by subscription.",
@@ -272,7 +326,7 @@ export function createServer(config: JeeroConfig): McpServer {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "list_event_categories",
     {
       description:
@@ -285,7 +339,7 @@ export function createServer(config: JeeroConfig): McpServer {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "get_ticket_snapshots",
     {
       description:
@@ -305,6 +359,9 @@ export function createServer(config: JeeroConfig): McpServer {
     }
     isClosed = true;
     backgroundSync.stop();
+    screen.close();
+    process.removeListener("SIGINT", shutdown);
+    process.removeListener("SIGTERM", shutdown);
     db.close();
   };
 
@@ -313,6 +370,7 @@ export function createServer(config: JeeroConfig): McpServer {
     process.exit(0);
   };
 
+  server.server.onclose = closeDb;
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
 
@@ -342,6 +400,7 @@ class JeeroService {
     private readonly db: JeeroDatabase,
     private readonly mother: MotherClient,
     private readonly activityLogger: ActivityTraceLogger | null,
+    private readonly secrets: SecretRedactor,
   ) {}
 
   public startBackgroundSync(): { stop: () => void } {
@@ -351,7 +410,7 @@ class JeeroService {
         await this.syncSubscriptionsInternal(subscriptions, { force: true });
       } catch (error: unknown) {
         const message = error instanceof Error ? error.stack ?? error.message : String(error);
-        process.stderr.write(`Background sync failed: ${message}\n`);
+        process.stderr.write(`Background sync failed: ${this.secrets.clean(message)}\n`);
       }
     };
 
@@ -445,13 +504,14 @@ class JeeroService {
       ...settings,
     };
 
+    this.secrets.remember(mergedSettings);
+    await this.mother.updateSubscription(current.motherSubscriptionId, mergedSettings);
     const persisted = this.db.updateSubscription({
       subscriptionKey: current.subscriptionKey,
       settings: mergedSettings,
       theater: selectedTheater(mergedSettings) || current.theater,
     });
 
-    await this.mother.updateSubscription(persisted.motherSubscriptionId, persisted.settings);
     const upstream = await this.mother.getSubscription(
       persisted.motherSubscriptionId,
       persisted.settings,
@@ -689,7 +749,7 @@ class JeeroService {
     };
   }
 
-  private resolveSubscription(subscriptionKey?: string): StoredSubscription {
+  public resolveSubscription(subscriptionKey?: string): StoredSubscription {
     if (subscriptionKey) {
       const subscription = this.db.getSubscriptionByKey(subscriptionKey);
       if (!subscription) {
@@ -820,7 +880,7 @@ class JeeroService {
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       for (const subscription of toFetch) {
-        this.db.setSyncState(subscription.subscriptionKey, "last_sync_error", message);
+        this.db.setSyncState(subscription.subscriptionKey, "last_sync_error", this.secrets.clean(message));
       }
       throw error;
     }
@@ -895,7 +955,7 @@ class JeeroService {
   }
 
   private logInboxActivity(message: string): void {
-    this.activityLogger?.log(message);
+    this.activityLogger?.log(this.secrets.clean(message));
   }
 
   private processEventItem(item: MotherInboxItem): {
@@ -940,7 +1000,7 @@ class JeeroService {
       subscriptionKey: subscription.subscriptionKey,
       subscriptionId: item.subscription_id ?? subscription.motherSubscriptionId,
       action: typeof item.action === "string" ? item.action : "",
-      message,
+      message: this.secrets.clean(message),
     });
     return true;
   }
@@ -1081,4 +1141,25 @@ function asString(value: unknown): string | null {
   }
 
   return null;
+}
+
+function publicSubscription(envelope: SubscriptionEnvelope): Record<string, unknown> {
+  return {
+    subscriptionKey: envelope.subscriptionKey,
+    label: envelope.label,
+    theater: envelope.theater,
+    motherSubscriptionId: envelope.motherSubscriptionId,
+    isDefault: envelope.isDefault,
+    isActive: envelope.isActive,
+    configuration_complete: Boolean(envelope.theater) && envelope.fields.every((field) => {
+      if (!isObject(field) || ![true, 1, "1"].includes(field.required as boolean | number | string)) return true;
+      const value = envelope.settings[String(field.name)];
+      return value !== undefined && value !== null && value !== "" && (!Array.isArray(value) || value.length > 0);
+    }),
+    connection_errors: envelope.fields.filter((field) => isObject(field) && field.type === "error").length,
+    configured_fields: Object.entries(envelope.settings)
+      .filter(([, value]) => value !== "" && value !== null && value !== undefined)
+      .map(([name]) => name),
+    next_step: "Use config_subscription for private configuration; never enter keys in chat.",
+  };
 }

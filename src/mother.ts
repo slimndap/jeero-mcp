@@ -1,6 +1,7 @@
 import fs from "node:fs";
 
 import type { JeeroConfig } from "./config.js";
+import { SecretRedactor } from "./secrets.js";
 
 export interface MotherSubscriptionResponse {
   subscriptionId: string;
@@ -34,7 +35,9 @@ export class MotherClient {
     private readonly config: JeeroConfig,
     private readonly siteKey: string,
     private readonly siteIdentifier: string,
+    private readonly secrets = new SecretRedactor(),
   ) {
+    this.secrets.remember(siteKey);
     this.traceLogger = config.motherTraceEnabled
       ? new MotherTraceLogger(config.motherTracePath)
       : null;
@@ -42,7 +45,7 @@ export class MotherClient {
 
   public async createSubscription(): Promise<{ subscriptionId: string; raw: unknown }> {
     const response = await this.request("POST", "/v1/subscriptions");
-    const raw = await response.json();
+    const raw = await readJson(response);
     return {
       subscriptionId: extractSubscriptionId(raw),
       raw,
@@ -53,6 +56,7 @@ export class MotherClient {
     subscriptionId: string,
     settings: Record<string, unknown>,
   ): Promise<MotherSubscriptionResponse> {
+    this.secrets.remember(settings);
     const payload = withTimezone(settings, this.config.defaultTimezone);
     const query = new URLSearchParams({
       settings: JSON.stringify(payload),
@@ -61,7 +65,7 @@ export class MotherClient {
       "GET",
       `/v1/subscriptions/${encodeURIComponent(subscriptionId)}?${query.toString()}`,
     );
-    const raw = await response.json();
+    const raw = await readJson(response);
     return parseSubscriptionResponse(subscriptionId, raw);
   }
 
@@ -69,6 +73,7 @@ export class MotherClient {
     subscriptionId: string,
     settings: Record<string, unknown>,
   ): Promise<unknown> {
+    this.secrets.remember(settings);
     const response = await this.request(
       "POST",
       `/v1/subscriptions/${encodeURIComponent(subscriptionId)}`,
@@ -76,7 +81,7 @@ export class MotherClient {
         settings: withTimezone(settings, this.config.defaultTimezone),
       },
     );
-    return response.json();
+    return readJson(response);
   }
 
   public async getInbox(
@@ -104,6 +109,7 @@ export class MotherClient {
       headers["no_of_items_per_pickup"] = String(this.config.noOfItemsPerPickup);
     }
 
+    requests.forEach((request) => this.secrets.remember(request.settings));
     const payload = Object.fromEntries(
       requests.map((request) => [
         request.subscriptionId,
@@ -117,12 +123,12 @@ export class MotherClient {
       payload,
       headers,
     );
-    const raw = await response.json();
+    const raw = await readJson(response);
     const itemsBySubscription = extractInboxItemsBySubscription(
       raw,
       requests.map((request) => request.subscriptionId),
     );
-    this.traceLogger?.logInboxLogItems(itemsBySubscription);
+    this.traceLogger?.logInboxLogItems(new Map([...itemsBySubscription].map(([id, items]) => [id, this.secrets.clean(items)])));
     return itemsBySubscription;
   }
 
@@ -156,34 +162,34 @@ export class MotherClient {
       this.traceLogger?.log({
         phase: "request",
         method,
-        url,
+        url: `${this.config.motherBaseUrl}${pathname.split("?")[0]}`,
         hasBody: body !== undefined,
         headerKeys: Object.keys(headers).sort(),
       });
     }
 
-    const response = await fetch(url, {
-      method,
-      headers,
-      body: requestBody,
-    });
+    let response: Response;
+    try {
+      response = await fetch(url, { method, headers, body: requestBody, signal: AbortSignal.timeout(30_000) });
+    } catch {
+      throw new Error("Mother connection failed. Please try again.");
+    }
 
     const responseBody = await response.clone().text();
     if (shouldTraceRequest(method, pathname)) {
       this.traceLogger?.log({
         phase: "response",
         method,
-        url,
+        url: `${this.config.motherBaseUrl}${pathname.split("?")[0]}`,
         status: response.status,
-        statusText: response.statusText,
-        bodyOmitted: !shouldLogResponseBody(pathname),
+        bodyOmitted: true,
         responseSize: responseBody.length,
       });
     }
 
     if (!response.ok) {
       throw new Error(
-        `Mother request failed (${response.status} ${response.statusText}) for ${method} ${pathname}: ${responseBody}`,
+        `Mother request failed (HTTP ${response.status}). Please check your configuration and try again.`,
       );
     }
 
@@ -221,10 +227,6 @@ class MotherTraceLogger {
       }
     }
   }
-}
-
-function shouldLogResponseBody(pathname: string): boolean {
-  return !pathname.startsWith("/v1/inbox");
 }
 
 function shouldTraceRequest(method: string, pathname: string): boolean {
@@ -413,4 +415,12 @@ function asOptionalArray(value: unknown): unknown[] | undefined {
 
 function asOptionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+async function readJson(response: Response): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
+    throw new Error("Mother returned an invalid response. Please try again.");
+  }
 }

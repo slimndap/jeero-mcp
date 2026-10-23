@@ -1,17 +1,69 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import Database from "better-sqlite3";
 
-import { normalizeSiteIdentifier } from "../dist/config.js";
+import { loadConfig, loadOrCreateSiteIdentity, normalizeSiteIdentifier } from "../dist/config.js";
 import { JeeroDatabase } from "../dist/db.js";
 
 test("normalizes Mother site identifiers", () => {
   assert.equal(normalizeSiteIdentifier("https://example.com/subsite/?ignored=yes"), "example.com/subsite");
   assert.equal(normalizeSiteIdentifier("example.com"), "example.com");
+});
+
+async function identityConfig(t, siteUrl) {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "jeero-mcp-identity-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const previous = { ...process.env };
+  try {
+    process.env.JEERO_DATA_DIR = dataDir;
+    if (siteUrl === undefined) delete process.env.JEERO_SITE_URL;
+    else process.env.JEERO_SITE_URL = siteUrl;
+    return loadConfig();
+  } finally {
+    for (const key of ["JEERO_DATA_DIR", "JEERO_SITE_URL"]) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+}
+
+test("new installations persist distinct UUID identifiers across restarts", async (t) => {
+  const firstConfig = await identityConfig(t);
+  const secondConfig = await identityConfig(t);
+  const first = loadOrCreateSiteIdentity(firstConfig);
+  const second = loadOrCreateSiteIdentity(secondConfig);
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  assert.match(first.siteIdentifier, uuid);
+  assert.match(second.siteIdentifier, uuid);
+  assert.notEqual(first.siteIdentifier, second.siteIdentifier);
+  assert.notEqual(first.siteKey, second.siteKey);
+  assert.deepEqual(JSON.parse(await readFile(firstConfig.siteIdentityPath, "utf8")), first);
+  assert.deepEqual(
+    loadOrCreateSiteIdentity({ ...firstConfig, siteIdentifier: secondConfig.siteIdentifier }),
+    first,
+  );
+});
+
+test("existing installations retain their hostname, key and identity file", async (t) => {
+  const config = await identityConfig(t, "different-override");
+  const legacy = {
+    siteKey: "existing-site-key",
+    siteIdentifier: "existing-computer.local",
+    createdAt: "2026-01-01T00:00:00.000Z",
+  };
+  const content = JSON.stringify(legacy, null, 2);
+  await writeFile(config.siteIdentityPath, content);
+  assert.deepEqual(loadOrCreateSiteIdentity(config), legacy);
+  assert.equal(await readFile(config.siteIdentityPath, "utf8"), content);
+});
+
+test("new installations still support an explicit site identifier override", async (t) => {
+  const config = await identityConfig(t, "https://example.com/subsite/");
+  assert.equal(loadOrCreateSiteIdentity(config).siteIdentifier, "example.com/subsite");
 });
 
 test("migrates a legacy database into the default subscription", async () => {

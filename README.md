@@ -35,10 +35,12 @@ Create a subscription with `create_subscription`. Mother first returns its **Tic
 
 By default Jeero MCP stores its SQLite cache and persistent site identity in `~/.jeero-mcp/`. Keep that directory private: the identity is used for Mother requests.
 
+New installations use a random UUID as their site identifier, saved in `site-identity.json` and reused on every restart. Existing installations keep their saved identifier and key so their Mother subscriptions and inbox remain accessible. Do not copy this identity file between independent installations.
+
 | Variable | Purpose |
 | --- | --- |
 | `JEERO_DATA_DIR` | Override the local data directory. |
-| `JEERO_SITE_URL` | Stable local site identifier; defaults to the machine hostname. |
+| `JEERO_SITE_URL` | Optional site identifier override for new installations; defaults to a random UUID. Existing saved identities take precedence. |
 | `JEERO_MOTHER_BASE_URL` | Override Mother’s base URL, for example for staging. |
 | `JEERO_NO_OF_ITEMS_PER_PICKUP` | Limit inbox items requested per sync. |
 | `JEERO_LOG_MOTHER` | Enable Mother request tracing with `true`, `1`, `yes`, or `on`. |

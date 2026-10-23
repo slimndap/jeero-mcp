@@ -41,7 +41,7 @@ export function loadConfig(): JeeroConfig {
 
   const dataDir = ensureDataDir();
   const siteIdentifier = normalizeSiteIdentifier(
-    process.env.JEERO_SITE_URL?.trim() || os.hostname(),
+    process.env.JEERO_SITE_URL?.trim() || crypto.randomUUID(),
   );
 
   return {
